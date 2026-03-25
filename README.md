@@ -1,6 +1,7 @@
 lIGA学習に使うlIGA1~4クラス色分け教師データ作成用のお絵描きアプリ<br>
 
 ーーーーフォルダ構成ーーーー<br>
+<pre>
 desktop/liga_annotation_project/app/<br>
                             │    ├──liga_annotation_app.py<br>
 　　　　　　　　　　　　　　　　　 　│ 　　├──liga_browser_app.py<br>
@@ -29,7 +30,7 @@ desktop/liga_annotation_project/app/<br>
                                         ├──02_skipped<br>
                                         ├──03_done<br>
                                         └──04_approved<br>
-<br>
+</pre><br>
 ーーーー使い方ーーーー<br>
 1.上記フォルダを作り、Pythonファイルとrequirements.txtを置く。<br>
 2.仮想環境を作り、requirements.txtをインストールする。<br>
