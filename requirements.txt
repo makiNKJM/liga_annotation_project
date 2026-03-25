@@ -1,0 +1,26 @@
+# --- Core (必須) ---
+numpy==1.26.4
+opencv-python>=4.8
+PyQt6>=6.0
+Pillow
+pillow-heif
+matplotlib
+
+# Segment Anything (SAM)
+# pip は git リンクもOK
+git+https://github.com/facebookresearch/segment-anything.git
+
+# PyTorch (MPS/CPU版; MacでOK)
+torch
+torchvision
+
+# --- Optional (使う場合だけ) ---
+# 背景除去機能を使うなら rembg と onnxruntime が必要
+rembg>=2.0.50
+onnxruntime>=1.16.0
+
+# 画像処理の補助（必要なら）
+scikit-image
+
+# --- Dev/Build (配布する場合だけ) ---
+pyinstaller
