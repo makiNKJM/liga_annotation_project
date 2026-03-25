@@ -1,30 +1,30 @@
 lIGA学習に使うlIGA1~4クラス色分け教師データ作成用のお絵描きアプリ<br>
 
 ーーーーフォルダ構成ーーーー<br>
-desktop/liga_annotation_project/app/
+desktop/liga_annotation_project/app/<br>
                             │    ├──liga_annotation_app.py<br>
 　　　　　　　　　　　　　　　　　 　│ 　　├──liga_browser_app.py<br>
                             │    ├──liga_launcher_app.py<br>
                             │    ├──liga_review_approve_app.py<br>
                             │    └──requirements.txt<br>
                             │      <br>
-                            └── data/
-                                  ├──images/
+                            └── data/<br>
+                                  ├──images/<br>
                                   │     ├──01_pending<br>
                                   │     ├──02_skipped<br>
                                   │     ├──03_done<br>
                                   │     └──04_approved<br>
-                                  ├──masks/
+                                  ├──masks/<br>
                                   │     ├──01_pending<br>
                                   │     ├──02_skipped<br>
                                   │     ├──03_done<br>
                                   │     └──04_approved<br>
-                                  ├──meta/
+                                  ├──meta/<br>
                                   │     ├──01_pending<br>
                                   │     ├──02_skipped<br>
                                   │     ├──03_done<br>
                                   │     └──04_approved<br>
-                                  └──overlays/
+                                  └──overlays/<br>
                                         ├──01_pending<br>
                                         ├──02_skipped<br>
                                         ├──03_done<br>
