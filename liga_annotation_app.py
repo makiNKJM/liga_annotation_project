@@ -11,6 +11,7 @@ import warnings
 import json
 import shutil
 from datetime import datetime
+import numpy as np
 
 # --- tkinter は環境に無い場合があるためガード ---
 try:
@@ -192,6 +193,15 @@ class FreePaintMaskApp:
         # 元画像だけを表示するかどうか（マスク無しプレビュー）
         self.show_overlay = True
 
+        # 補助ヒートマップ表示
+        self.show_heatmap = tk.BooleanVar(value=False)
+        self.heat_threshold = 140   # 0-255
+        self.heat_alpha = 90        # 0-255
+        self.red_index_map = None   # 元画像全体の赤み指標（uint8）
+        self.last_mouse_canvas_x = None
+        self.last_mouse_canvas_y = None
+        self.heat_gamma = 1.0   # ←追加（1.0が標準）
+
         # ドラッグ
         self.prev_ix = None
         self.prev_iy = None
@@ -309,7 +319,7 @@ class FreePaintMaskApp:
         self.btn_redo.pack(side=tk.LEFT, padx=6)
 
 
-                # ---- Row2 左: lIGA ボタン ----
+        # ---- Row2 左: lIGA ボタン ----
         liga_frame = tk.Frame(tools_row2)
         liga_frame.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -369,6 +379,53 @@ class FreePaintMaskApp:
         # Row3: 表示ON/OFF
         vis_frame = tk.LabelFrame(tools_row3, text="表示ON/OFF")
         vis_frame.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Row3: 補助ヒートマップ
+        heat_frame = tk.LabelFrame(tools_row3, text="補助ヒートマップ")
+        heat_frame.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.chk_heatmap = tk.Checkbutton(
+            heat_frame,
+            text="補助ヒートマップ表示",
+            variable=self.show_heatmap,
+            command=self.on_toggle_heatmap
+        )
+        self.chk_heatmap.pack(side=tk.LEFT, padx=4)
+
+        self.heat_thresh_scale = tk.Scale(
+            heat_frame,
+            from_=0, to=255,
+            orient=tk.HORIZONTAL,
+            length=180,
+            label="閾値",
+            command=self.on_heat_threshold_change
+        )
+        self.heat_thresh_scale.set(self.heat_threshold)
+        self.heat_thresh_scale.pack(side=tk.LEFT, padx=6)
+
+        self.heat_alpha_scale = tk.Scale(
+            heat_frame,
+            from_=0, to=255,
+            orient=tk.HORIZONTAL,
+            length=180,
+            label="透明度",
+            command=self.on_heat_alpha_change
+        )
+        self.heat_alpha_scale.set(self.heat_alpha)
+        self.heat_alpha_scale.pack(side=tk.LEFT, padx=6)
+
+        self.heat_gamma_scale = tk.Scale(
+            heat_frame,
+            from_=0.3, to=3.0, 
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            length=180,
+            label="強調",
+            command=self.on_heat_gamma_change
+        )
+        self.heat_gamma_scale.set(self.heat_gamma)
+        self.heat_gamma_scale.pack(side=tk.LEFT, padx=6)
+
 
         self.var_show_1 = tk.BooleanVar(value=True)
         self.var_show_2 = tk.BooleanVar(value=True)
@@ -473,6 +530,33 @@ class FreePaintMaskApp:
         self.visible_labels[3] = self.var_show_3.get()
         self.visible_labels[4] = self.var_show_4.get()
         self._render(mode="final")
+
+    def on_toggle_heatmap(self):
+        self._render(mode="final")
+
+    def on_heat_threshold_change(self, value):
+        try:
+            self.heat_threshold = int(float(value))
+        except Exception:
+            return
+        self._render(mode="fast")
+        self._schedule_hq()
+
+    def on_heat_alpha_change(self, value):
+        try:
+            self.heat_alpha = int(float(value))
+        except Exception:
+            return
+        self._render(mode="fast")
+        self._schedule_hq()
+    
+    def on_heat_gamma_change(self, value):
+        try:
+            self.heat_gamma = float(value)
+        except Exception:
+            return
+        self._render(mode="fast")
+        self._schedule_hq()
 
     # ------------ キー処理 ------------
     def on_key(self, ev):
@@ -651,6 +735,7 @@ class FreePaintMaskApp:
             return False
 
         self.image = img
+        self.red_index_map = self._build_red_index_map(self.image)
         self._build_mipmaps()
 
         # ラベルマスク（L, 0で初期化）
@@ -687,6 +772,92 @@ class FreePaintMaskApp:
 
         self.zoom_slider.set(100)
         self.refresh_display()
+
+    def _build_red_index_map(self, pil_rgba):
+        """
+        赤み指標マップを 0-255 の uint8 で返す。
+        指標: Excess Red = 2R - G - B
+        """
+        rgb = np.array(pil_rgba.convert("RGB"), dtype=np.float32)
+        r = rgb[:, :, 0]
+        g = rgb[:, :, 1]
+        b = rgb[:, :, 2]
+
+        exr = 2.0 * r - g - b
+
+        # 画像ごとに min-max 正規化
+        mn = float(exr.min())
+        mx = float(exr.max())
+        if mx - mn < 1e-6:
+            norm = np.zeros_like(exr, dtype=np.uint8)
+        else:
+            norm = ((exr - mn) / (mx - mn) * 255.0).clip(0, 255).astype(np.uint8)
+        return norm
+
+    def _make_heat_overlay_partial(self, red_small, threshold, alpha):
+        """
+        red_small: リサイズ済み赤みマップ(PIL L)
+        threshold以上だけ赤オーバーレイを作る
+        """
+        arr = np.array(red_small, dtype=np.uint8)
+
+        # threshold未満は表示しない
+        strength = arr.astype(np.int16) - int(threshold)
+        strength = np.clip(strength, 0, 255).astype(np.uint8)
+
+        if strength.max() == 0:
+            return Image.new("RGBA", red_small.size, (0, 0, 0, 0))
+
+        norm = strength.astype(np.float32) / 255.0
+
+        # ★ここが強調の本体
+        norm = np.power(norm, self.heat_gamma)
+
+        alpha_map = (norm * float(alpha)).clip(0, 255).astype(np.uint8)
+
+        h, w = strength.shape
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, 0] = 255          # R
+        rgba[:, :, 1] = 0            # G
+        rgba[:, :, 2] = 0            # B
+        rgba[:, :, 3] = alpha_map    # A
+
+        return Image.fromarray(rgba, mode="RGBA")
+
+    def _get_red_value_at_canvas(self, cx, cy):
+        if self.image is None or self.red_index_map is None:
+            return None
+        ix, iy = self.canvas_to_image_xy(cx, cy)
+        if ix is None:
+            return None
+        try:
+            return int(self.red_index_map[iy, ix])
+        except Exception:
+            return None
+
+    def _draw_red_value_text(self):
+        if self.last_mouse_canvas_x is None or self.last_mouse_canvas_y is None:
+            return
+        val = self._get_red_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
+        if val is None:
+            return
+
+        text = f"赤み: {val}"
+        x = 12
+        y = 12
+
+        self.canvas.create_rectangle(
+            x - 4, y - 4, x + 92, y + 20,
+            fill="black", outline="white", width=1, tags="hud"
+        )
+        self.canvas.create_text(
+            x, y,
+            text=text,
+            anchor="nw",
+            fill="white",
+            font=("Arial", 11, "bold"),
+            tags="hud"
+        )
 
     # ------------ 表示更新 ------------
     def on_canvas_resize(self, event):
@@ -765,6 +936,9 @@ class FreePaintMaskApp:
             base = region_img.resize((dst_w, dst_h), interp_img)
             labels_small = region_msk.resize((dst_w, dst_h), interp_msk)
 
+        disp_partial = base.convert("RGBA")
+
+        # 既存のマスクオーバーレイ
         if self.show_overlay:
             overlay = Image.new("RGBA", (dst_w, dst_h), (0, 0, 0, 0))
             for cls, rgba in self.class_colors.items():
@@ -775,9 +949,22 @@ class FreePaintMaskApp:
                     continue
                 tint = Image.new("RGBA", (dst_w, dst_h), rgba)
                 overlay = Image.composite(tint, overlay, cls_mask)
-            disp_partial = Image.alpha_composite(base.convert("RGBA"), overlay)
-        else:
-            disp_partial = base.convert("RGBA")
+            disp_partial = Image.alpha_composite(disp_partial, overlay)
+
+        # 補助ヒートマップ
+        if bool(self.show_heatmap.get()) and self.red_index_map is not None:
+            red_crop = Image.fromarray(self.red_index_map[src_t:src_b, src_l:src_r], mode="L")
+            try:
+                red_small = red_crop.resize((dst_w, dst_h), Image.Resampling.BILINEAR, reducing_gap=3.0)
+            except TypeError:
+                red_small = red_crop.resize((dst_w, dst_h), Image.Resampling.BILINEAR)
+
+            heat_overlay = self._make_heat_overlay_partial(
+                red_small=red_small,
+                threshold=self.heat_threshold,
+                alpha=self.heat_alpha
+            )
+            disp_partial = Image.alpha_composite(disp_partial, heat_overlay)
 
         canvas_img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
         canvas_img.paste(disp_partial, (vis_l, vis_t))
@@ -788,6 +975,8 @@ class FreePaintMaskApp:
         self.photo = PIL_ImageTk.PhotoImage(self.display_image)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
+        self.canvas.delete("hud")
+        self._draw_red_value_text()
 
         if (self._should_show_brush_preview() or self.show_brush_preview) and self.image is not None:
             self.draw_brush_preview()
@@ -853,12 +1042,25 @@ class FreePaintMaskApp:
     def on_mouse_move(self, event):
         if self.image is None:
             return
+
+        self.last_mouse_canvas_x = event.x
+        self.last_mouse_canvas_y = event.y
+
         if self._should_show_brush_preview():
             self.draw_brush_preview()
 
+        try:
+            self.canvas.delete("hud")
+        except Exception:
+            pass
+        self._draw_red_value_text()
+
     def on_mouse_leave(self, event):
+        self.last_mouse_canvas_x = None
+        self.last_mouse_canvas_y = None
         try:
             self.canvas.delete("brush_preview")
+            self.canvas.delete("hud")
         except Exception:
             pass
 
