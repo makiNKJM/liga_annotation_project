@@ -153,7 +153,7 @@ class FreePaintMaskApp:
     def __init__(self, root, inputs=None, output_dir=None):
         self.root = root
         self.root.title("フリーペイント lIGAマスク作成（0〜4）")
-        self.root.geometry("900x650")
+        self.root.geometry("1100x750")
 
         # 入出力管理
         self.inputs = inputs or []
@@ -195,18 +195,22 @@ class FreePaintMaskApp:
 
         # 補助ヒートマップ表示（赤み）
         self.show_heatmap = tk.BooleanVar(value=False)
-        self.heat_threshold = 140   # 0-255
+        self.heat_threshold = 20   # 0-255
         self.red_index_map = None   # 元画像全体の赤み指標（uint8）
         self.heat_strength = 50     # 0-100
 
         # 補助ヒートマップ表示（色素）
         self.show_pigmentmap = tk.BooleanVar(value=False)
-        self.pigment_threshold = 140   # 0-255
+        self.pigment_threshold = 20   # 0-255
         self.pigment_strength = 50     # 0-100
         self.pigment_index_map = None  # 元画像全体の色素指標（uint8）
 
         self.last_mouse_canvas_x = None
         self.last_mouse_canvas_y = None
+
+        self.ref_red = 0
+        self.ref_pigment = 0
+        self.ref_mode = False
 
         # ドラッグ
         self.prev_ix = None
@@ -220,6 +224,13 @@ class FreePaintMaskApp:
 
         # 移動モード
         self.move_mode = False
+
+        # ROI（矩形）
+        self.roi_mode = False
+        self.roi_start = None
+        self.roi_end = None
+        self.roi_rect_id = None
+        self.roi_outline_color = "#001f5b"  
 
         # ズーム/パン状態
         self.view_x = 0.0
@@ -251,22 +262,62 @@ class FreePaintMaskApp:
 
     # ------------ UI ------------
     def build_ui(self):
-        top = tk.Frame(self.root)
-        top.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(8, 4))
+        # ===== メイン2カラム =====
+        main = tk.Frame(self.root)
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left_head = tk.Frame(top)
-        left_head.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 左：固定幅スクロール付きツールパネル
+        left_outer = tk.Frame(main, width=440)
+        left_outer.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left_outer.pack_propagate(False)
 
-        right_head = tk.Frame(top)
-        right_head.pack(side=tk.RIGHT)
+        self.left_canvas = tk.Canvas(left_outer, highlightthickness=0)
+        self.left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 進捗ラベル
-        self.lbl_info = tk.Label(left_head, text="画像未読込", anchor="w")
-        self.lbl_info.pack(side=tk.LEFT, padx=(0, 10))
+        self.left_scrollbar = tk.Scrollbar(left_outer, orient="vertical", command=self.left_canvas.yview)
+        self.left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ===== 上段：保存ボタン群（右側） =====
+        self.left_canvas.configure(yscrollcommand=self.left_scrollbar.set)
+
+        # スクロール対象の実体フレーム
+        self.left_panel = tk.Frame(self.left_canvas)
+        self.left_panel_window = self.left_canvas.create_window(
+            (0, 0),
+            window=self.left_panel,
+            anchor="nw"
+        )
+
+        # 中身サイズが変わったらスクロール範囲更新
+        self.left_panel.bind("<Configure>", self._on_left_panel_configure)
+
+        # Canvasサイズが変わったら中身幅を合わせる
+        self.left_canvas.bind("<Configure>", self._on_left_canvas_configure)
+
+        # 左パネル上でマウスホイールスクロール
+        self.left_canvas.bind("<Enter>", self._bind_left_panel_mousewheel)
+        self.left_canvas.bind("<Leave>", self._unbind_left_panel_mousewheel)
+
+        # 右：画像表示
+        right_panel = tk.Frame(main)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # -----------------------------
+        # row1: 画像名称だけ
+        # -----------------------------
+        row1 = tk.LabelFrame(self.left_panel, text="画像")
+        row1.pack(fill=tk.X, pady=(0, 6))
+
+        self.lbl_info = tk.Label(row1, text="画像未読込", anchor="w", justify="left")
+        self.lbl_info.pack(fill=tk.X, padx=8, pady=6)
+
+        # -----------------------------
+        # row2: 保存（次へ）、皮疹なしで保存（次へ）
+        # -----------------------------
+        row2 = tk.Frame(self.left_panel)
+        row2.pack(fill=tk.X, pady=(0, 6))
+
         self.btn_save = tk.Button(
-            right_head,
+            row2,
             text="保存（次へ）",
             command=self.save_mask,
             state=tk.DISABLED,
@@ -280,90 +331,159 @@ class FreePaintMaskApp:
             highlightthickness=2,
             bd=3
         )
-        self.btn_save_empty = tk.Button(right_head, text="皮疹なしで保存（次へ）", command=self.save_empty_mask)
-        self.btn_skip = tk.Button(right_head, text="スキップ（次へ）", command=self.skip_current)
-        self.btn_cancel = tk.Button(right_head, text="強制停止", command=self.force_quit)
+        self.btn_save.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        # 右から並べる（見た目の好みで順は変えてOK）
-        self.btn_cancel.pack(side=tk.RIGHT, padx=6)
-        self.btn_skip.pack(side=tk.RIGHT, padx=6)
-        self.btn_save_empty.pack(side=tk.RIGHT, padx=6)
-        self.btn_save.pack(side=tk.RIGHT, padx=6)
+        self.btn_save_empty = tk.Button(
+            row2,
+            text="皮疹なしで保存（次へ）",
+            command=self.save_empty_mask
+        )
+        self.btn_save_empty.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        # ツール行
-        tools = tk.Frame(self.root)
-        tools.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
+        # -----------------------------
+        # row3: スキップ、強制停止
+        # -----------------------------
+        row3 = tk.Frame(self.left_panel)
+        row3.pack(fill=tk.X, pady=(0, 6))
 
-        tools_row1 = tk.Frame(tools)
-        tools_row1.pack(side=tk.TOP, fill=tk.X)
+        self.btn_skip = tk.Button(row3, text="スキップ（次へ）", command=self.skip_current)
+        self.btn_skip.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        tools_row2 = tk.Frame(tools)
-        tools_row2.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+        self.btn_cancel = tk.Button(row3, text="強制停止", command=self.force_quit)
+        self.btn_cancel.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        tools_row3 = tk.Frame(tools)
-        tools_row3.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+        # -----------------------------
+        # row4: ブラシサイズ、消しゴム、塗りつぶし
+        # -----------------------------
+        row4 = tk.LabelFrame(self.left_panel)
+        row4.pack(fill=tk.X, pady=(0, 6))
 
-        tools_row4 = tk.Frame(tools)
-        tools_row4.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
-
-        # Row1: ブラシ系
-        self.brush_scale = tk.Scale(tools_row1, from_=5, to=100, orient=tk.HORIZONTAL, length=200,
-                                    label="ブラシ:", command=self.on_scale_change)
+        self.brush_scale = tk.Scale(
+            row4,
+            from_=5, to=100,
+            orient=tk.HORIZONTAL,
+            length=260,
+            label="ブラシサイズ",
+            command=self.on_scale_change
+        )
         self.brush_scale.set(self.brush_size)
         self.brush_scale.bind("<ButtonPress-1>", self.on_brush_scale_press)
         self.brush_scale.bind("<B1-Motion>", self.on_brush_scale_drag)
         self.brush_scale.bind("<ButtonRelease-1>", self.on_brush_scale_release)
-        self.brush_scale.pack(side=tk.LEFT, padx=6)
+        self.brush_scale.pack(fill=tk.X, padx=8, pady=(4, 2))
 
-        self.btn_eraser = tk.Button(tools_row1, text=self.eraser_label(), command=self.toggle_eraser)
-        self.btn_eraser.pack(side=tk.LEFT, padx=6)
+        row4_btns = tk.Frame(row4)
+        row4_btns.pack(fill=tk.X, padx=8, pady=(2, 6))
 
-        self.btn_fill = tk.Button(tools_row1, text=self.fill_label(), command=self.toggle_fill)
-        self.btn_fill.pack(side=tk.LEFT, padx=6)
+        self.btn_eraser = tk.Button(row4_btns, text=self.eraser_label(), command=self.toggle_eraser)
+        self.btn_eraser.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        self.btn_undo = tk.Button(tools_row1, text="１つ戻る", command=self.undo, state=tk.DISABLED)
-        self.btn_undo.pack(side=tk.LEFT, padx=8)
+        self.btn_fill = tk.Button(row4_btns, text=self.fill_label(), command=self.toggle_fill)
+        self.btn_fill.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        self.btn_redo = tk.Button(tools_row1, text="１つ進む", command=self.redo, state=tk.DISABLED)
-        self.btn_redo.pack(side=tk.LEFT, padx=6)
+        # -----------------------------
+        # row5: １つ戻る、１つ進む、元画像のみ
+        # -----------------------------
+        row5 = tk.Frame(self.left_panel)
+        row5.pack(fill=tk.X, pady=(0, 6))
 
+        self.btn_undo = tk.Button(row5, text="１つ戻る", command=self.undo, state=tk.DISABLED)
+        self.btn_undo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
 
-        # ---- Row2 左: lIGA ボタン ----
-        liga_frame = tk.Frame(tools_row2)
-        liga_frame.pack(side=tk.LEFT, padx=(0, 10))
+        self.btn_redo = tk.Button(row5, text="１つ進む", command=self.redo, state=tk.DISABLED)
+        self.btn_redo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+ 
+        self.btn_toggle_overlay = tk.Button(
+            row5,
+            text="元画像のみ",
+            command=self.toggle_overlay
+        )
+        self.btn_toggle_overlay.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
-        for k, label in [
+        # -----------------------------
+        # row6: lIGA1〜4
+        # -----------------------------
+        row6 = tk.LabelFrame(self.left_panel, text="lIGAクラス")
+        row6.pack(fill=tk.X, pady=(0, 6))
+
+        liga_row_a = tk.Frame(row6)
+        liga_row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
+
+        liga_row_b = tk.Frame(row6)
+        liga_row_b.pack(fill=tk.X, padx=8, pady=(3, 6))
+
+        self.label_buttons = {}
+
+        liga_defs = [
             (1, "lIGA1(わずか)"),
             (2, "lIGA2(軽度)"),
             (3, "lIGA3(中等度)"),
             (4, "lIGA4(重度)"),
-        ]:
+        ]
+
+        for idx, (k, label) in enumerate(liga_defs):
+            parent = liga_row_a if idx < 2 else liga_row_b
             btn = tk.Button(
-                liga_frame,
+                parent,
                 text=label,
                 command=lambda v=k: self.set_label(v),
-                width=12,
                 bd=2,
                 highlightthickness=2
             )
-            btn.pack(side=tk.LEFT, padx=2)
+            btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
             self.label_buttons[k] = btn
 
-        # 選択状態の反映
         self.update_label_buttons()
 
-        # Row2: パン&ズーム
-        self.var_move = tk.BooleanVar(value=False)
-        self.chk_move = tk.Checkbutton(
-            tools_row2, text="移動モード（ドラッグでパン）",
-            variable=self.var_move, command=self.on_toggle_move
-        )
-        self.chk_move.pack(side=tk.LEFT, padx=(0, 10))
+        # -----------------------------
+        # row7: lIGA表示ON/OFF
+        # -----------------------------
+        row7 = tk.LabelFrame(self.left_panel, text="lIGA表示ON/OFF")
+        row7.pack(fill=tk.X, pady=(0, 6))
 
-        zoom_wrap = tk.Frame(tools_row2)
-        zoom_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.var_show_1 = tk.BooleanVar(value=True)
+        self.var_show_2 = tk.BooleanVar(value=True)
+        self.var_show_3 = tk.BooleanVar(value=True)
+        self.var_show_4 = tk.BooleanVar(value=True)
+
+        vis_row_a = tk.Frame(row7)
+        vis_row_a.pack(fill=tk.X, padx=8, pady=(6, 3))
+
+        vis_row_b = tk.Frame(row7)
+        vis_row_b.pack(fill=tk.X, padx=8, pady=(3, 6))
+
+        tk.Checkbutton(
+            vis_row_a, text="lIGA1",
+            variable=self.var_show_1,
+            command=self.on_toggle_visibility
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Checkbutton(
+            vis_row_a, text="lIGA2",
+            variable=self.var_show_2,
+            command=self.on_toggle_visibility
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Checkbutton(
+            vis_row_a, text="lIGA3",
+            variable=self.var_show_3,
+            command=self.on_toggle_visibility
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Checkbutton(
+            vis_row_a, text="lIGA4",
+            variable=self.var_show_4,
+            command=self.on_toggle_visibility
+        ).pack(side=tk.LEFT, padx=4)
+
+        # -----------------------------
+        # row8: ズームスライダー、移動モード
+        # -----------------------------
+        row8 = tk.LabelFrame(self.left_panel)
+        row8.pack(fill=tk.X, pady=(0, 6))
+
         self.zoom_slider = tk.Scale(
-            zoom_wrap,
+            row8,
             from_=100,
             to=500,
             orient=tk.HORIZONTAL,
@@ -371,125 +491,135 @@ class FreePaintMaskApp:
             command=self.on_zoom_slider_change
         )
         self.zoom_slider.set(100)
-        self.zoom_slider.pack(side=tk.TOP, fill=tk.X, expand=True)
+        self.zoom_slider.pack(fill=tk.X, padx=8, pady=(4, 2))
 
-        # ブラシプレビュー
-        self.show_brush_preview = False
-        self._slider_operating = False
+        move_row = tk.Frame(row8)
+        move_row.pack(fill=tk.X, padx=8, pady=(2, 6))
 
-        # ★ 元画像のみ表示トグルボタン
-        self.btn_toggle_overlay = tk.Button(
-            tools_row2,
-            text="元画像のみ",  # 今はマスク表示中なので「押すと元画像だけ」の意味
-            command=self.toggle_overlay
+        self.var_move = tk.BooleanVar(value=False)
+        self.chk_move = tk.Checkbutton(
+            move_row,
+            text="移動モード（ドラッグでパン）",
+            variable=self.var_move,
+            command=self.on_toggle_move
         )
-        self.btn_toggle_overlay.pack(side=tk.RIGHT, padx=8)
+        self.chk_move.pack(side=tk.LEFT)
 
-        # Row3: 表示ON/OFF
-        vis_frame = tk.LabelFrame(tools_row3, text="表示ON/OFF")
-        vis_frame.pack(side=tk.LEFT, padx=(0, 10))
+        # -----------------------------
+        # row9: 基準色設定、基準色リセット
+        # -----------------------------
+        row9 = tk.Frame(self.left_panel)
+        row9.pack(fill=tk.X, pady=(0, 6))
 
-        # Row3: 補助ヒートマップ
-        heat_frame = tk.LabelFrame(tools_row3, text="補助ヒートマップ")
-        heat_frame.pack(side=tk.RIGHT, padx=10)
+        self.btn_ref = tk.Button(
+            row9,
+            text="基準色設定",
+            command=self.toggle_ref_mode
+        )
+        self.btn_ref.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        self.btn_ref_reset = tk.Button(
+            row9,
+            text="基準色リセット",
+            command=self.reset_reference
+        )
+        self.btn_ref_reset.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        # -----------------------------
+        # row10: ROI指定、閾値以上を塗る
+        # -----------------------------
+        row10 = tk.Frame(self.left_panel)
+        row10.pack(fill=tk.X, pady=(0, 6))
+
+        self.btn_roi = tk.Button(
+            row10,
+            text="ROI指定",
+            command=self.toggle_roi_mode
+        )
+        self.btn_roi.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        self.btn_auto_paint = tk.Button(
+            row10,
+            text="閾値以上を塗る",
+            command=self.auto_paint_from_threshold
+        )
+        self.btn_auto_paint.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        # -----------------------------
+        # row11: 赤色ヒートマップ
+        # -----------------------------
+        row11 = tk.LabelFrame(self.left_panel, text="赤色ヒートマップ")
+        row11.pack(fill=tk.X, pady=(0, 6))
 
         self.chk_heatmap = tk.Checkbutton(
-            heat_frame,
+            row11,
             text="赤色ヒートマップ表示",
             variable=self.show_heatmap,
             command=self.on_toggle_heatmap
         )
-        self.chk_heatmap.pack(side=tk.LEFT, padx=4)
+        self.chk_heatmap.pack(anchor="w", padx=8, pady=(4, 2))
 
         self.heat_thresh_scale = tk.Scale(
-            heat_frame,
-            from_=0, to=255,
+            row11,
+            from_=0, to=100,
             orient=tk.HORIZONTAL,
-            length=180,
-            label="閾値",
+            length=260,
+            label="閾値（基準差）",
             command=self.on_heat_threshold_change
         )
         self.heat_thresh_scale.set(self.heat_threshold)
-        self.heat_thresh_scale.pack(side=tk.LEFT, padx=6)
+        self.heat_thresh_scale.pack(fill=tk.X, padx=8, pady=2)
 
         self.heat_strength_scale = tk.Scale(
-            heat_frame,
+            row11,
             from_=0, to=100,
             orient=tk.HORIZONTAL,
-            length=180,
+            length=260,
             label="強度",
             command=self.on_heat_strength_change
         )
         self.heat_strength_scale.set(self.heat_strength)
-        self.heat_strength_scale.pack(side=tk.LEFT, padx=6)
+        self.heat_strength_scale.pack(fill=tk.X, padx=8, pady=(2, 6))
 
-        # Row4: 色素ヒートマップ
-        pigment_frame = tk.LabelFrame(tools_row4)
-        pigment_frame.pack(side=tk.RIGHT, padx=10)
+        # -----------------------------
+        # row12: 色素ヒートマップ
+        # -----------------------------
+        row12 = tk.LabelFrame(self.left_panel, text="色素ヒートマップ")
+        row12.pack(fill=tk.X, pady=(0, 6))
 
         self.chk_pigmentmap = tk.Checkbutton(
-            pigment_frame,
+            row12,
             text="色素ヒートマップ表示",
             variable=self.show_pigmentmap,
             command=self.on_toggle_pigmentmap
         )
-        self.chk_pigmentmap.pack(side=tk.LEFT, padx=4)
+        self.chk_pigmentmap.pack(anchor="w", padx=8, pady=(4, 2))
 
         self.pigment_thresh_scale = tk.Scale(
-            pigment_frame,
-            from_=0, to=255,
+            row12,
+            from_=0, to=100,
             orient=tk.HORIZONTAL,
-            length=180,
-            label="閾値",
+            length=260,
+            label="閾値（基準差）",
             command=self.on_pigment_threshold_change
         )
         self.pigment_thresh_scale.set(self.pigment_threshold)
-        self.pigment_thresh_scale.pack(side=tk.LEFT, padx=6)
+        self.pigment_thresh_scale.pack(fill=tk.X, padx=8, pady=2)
 
         self.pigment_strength_scale = tk.Scale(
-            pigment_frame,
+            row12,
             from_=0, to=100,
             orient=tk.HORIZONTAL,
-            length=180,
+            length=260,
             label="強度",
             command=self.on_pigment_strength_change
         )
         self.pigment_strength_scale.set(self.pigment_strength)
-        self.pigment_strength_scale.pack(side=tk.LEFT, padx=6)
+        self.pigment_strength_scale.pack(fill=tk.X, padx=8, pady=(2, 6))
 
-
-        self.var_show_1 = tk.BooleanVar(value=True)
-        self.var_show_2 = tk.BooleanVar(value=True)
-        self.var_show_3 = tk.BooleanVar(value=True)
-        self.var_show_4 = tk.BooleanVar(value=True)
-
-        tk.Checkbutton(
-            vis_frame, text="lIGA1",
-            variable=self.var_show_1,
-            command=self.on_toggle_visibility
-        ).pack(side=tk.LEFT, padx=4)
-
-        tk.Checkbutton(
-            vis_frame, text="lIGA2",
-            variable=self.var_show_2,
-            command=self.on_toggle_visibility
-        ).pack(side=tk.LEFT, padx=4)
-
-        tk.Checkbutton(
-            vis_frame, text="lIGA3",
-            variable=self.var_show_3,
-            command=self.on_toggle_visibility
-        ).pack(side=tk.LEFT, padx=4)
-
-        tk.Checkbutton(
-            vis_frame, text="lIGA4",
-            variable=self.var_show_4,
-            command=self.on_toggle_visibility
-        ).pack(side=tk.LEFT, padx=4)
-
-        # キャンバス
-        self.canvas_frame = tk.Frame(self.root, bd=1, relief=tk.SUNKEN)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # ===== 右側キャンバス =====
+        self.canvas_frame = tk.Frame(right_panel, bd=1, relief=tk.SUNKEN)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(self.canvas_frame, bg="#2f2f2f")
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -562,6 +692,73 @@ class FreePaintMaskApp:
         self.visible_labels[4] = self.var_show_4.get()
         self._render(mode="final")
 
+    def toggle_ref_mode(self):
+        self.ref_mode = not self.ref_mode
+        if self.ref_mode:
+            self.btn_ref.config(text="基準色クリック中")
+        else:
+            self.btn_ref.config(text="基準色設定")
+
+    def _on_left_panel_configure(self, event=None):
+        try:
+            self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_left_canvas_configure(self, event):
+        try:
+            self.left_canvas.itemconfigure(self.left_panel_window, width=event.width)
+        except Exception:
+            pass
+
+    def _bind_left_panel_mousewheel(self, event=None):
+        self.left_canvas.bind_all("<MouseWheel>", self._on_left_panel_mousewheel)
+        self.left_canvas.bind_all("<Button-4>", self._on_left_panel_mousewheel)
+        self.left_canvas.bind_all("<Button-5>", self._on_left_panel_mousewheel)
+
+    def _unbind_left_panel_mousewheel(self, event=None):
+        self.left_canvas.unbind_all("<MouseWheel>")
+        self.left_canvas.unbind_all("<Button-4>")
+        self.left_canvas.unbind_all("<Button-5>")
+
+    def _on_left_panel_mousewheel(self, event):
+        try:
+            if getattr(event, "num", None) == 4:
+                self.left_canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                self.left_canvas.yview_scroll(1, "units")
+            else:
+                delta = getattr(event, "delta", 0)
+                if delta != 0:
+                    self.left_canvas.yview_scroll(int(-delta / 120), "units")
+        except Exception:
+            pass
+
+    def reset_reference(self):
+        self.ref_red = 0
+        self.ref_pigment = 0
+        self.ref_mode = False
+        self.btn_ref.config(text="基準色設定")
+        self._render(mode="final")    
+
+
+    def toggle_roi_mode(self):
+        self.roi_mode = not self.roi_mode
+
+        if self.roi_mode:
+            self.btn_roi.config(text="--ROI指定中--")
+        else:
+            self.btn_roi.config(text="ROI指定")
+            self.clear_roi()
+            self._render(mode="final")
+
+    def clear_roi(self):
+        self.roi_start = None
+        self.roi_end = None
+        if self.roi_rect_id is not None:
+            self.canvas.delete(self.roi_rect_id)
+            self.roi_rect_id = None
+
     def on_toggle_heatmap(self):
         self._render(mode="final")
 
@@ -616,7 +813,7 @@ class FreePaintMaskApp:
         total = max(1, len(self.inputs))
         cur = min(self.cur_index + 1, total)
         name = getattr(self, "current_name", "（ダイアログ読込）")
-        self.lbl_info.config(text=f"{cur}/{total}: {name}")
+        self.lbl_info.config(text=f"{cur}/{total}\n{name}")
 
     def eraser_label(self):
         return "消しゴム：ON" if self.is_erasing else "消しゴム：OFF"
@@ -871,44 +1068,6 @@ class FreePaintMaskApp:
 
         return norm
 
-    def _make_heat_overlay_partial(self, red_small, threshold, strength_ui):
-        """
-        red_small: リサイズ済み赤みマップ(PIL L)
-        threshold以上だけ赤オーバーレイを作る
-
-        strength_ui: 0-100
-          - 左: 控えめ表示（強い赤中心）
-          - 右: 薄い赤も見えやすい
-        """
-        arr = np.array(red_small, dtype=np.uint8)
-
-        # threshold未満は表示しない
-        strength = arr.astype(np.int16) - int(threshold)
-        strength = np.clip(strength, 0, 255).astype(np.uint8)
-
-        if strength.max() == 0:
-            return Image.new("RGBA", red_small.size, (0, 0, 0, 0))
-
-        s = float(np.clip(strength_ui, 0, 100)) / 100.0
-
-        # UI 1本で alpha_max と gamma を連動
-        # 左: 控えめ / 右: 薄い赤も持ち上げる
-        alpha_max = 100.0 + 155.0 * s      # 100 → 255
-        gamma = 1.8 - 1.5 * s              # 1.8 → 0.3
-
-        norm = strength.astype(np.float32) / 255.0
-        norm = np.power(norm, gamma)
-
-        alpha_map = (norm * alpha_max).clip(0, 255).astype(np.uint8)
-
-        h, w = strength.shape
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[:, :, 0] = 255
-        rgba[:, :, 1] = 0
-        rgba[:, :, 2] = 0
-        rgba[:, :, 3] = alpha_map
-
-        return Image.fromarray(rgba, mode="RGBA")
     
     def _make_scalar_overlay_partial(self, gray_small, threshold, strength_ui, color_rgb):
         """
@@ -919,6 +1078,14 @@ class FreePaintMaskApp:
         color_rgb: (R, G, B)
         """
         arr = np.array(gray_small, dtype=np.uint8)
+
+       # 補正
+        if color_rgb == (255, 0, 0):  # 赤み
+            arr = arr.astype(np.int16) - self.ref_red  
+        else:  # 色素
+            arr = arr.astype(np.int16) - self.ref_pigment
+
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
 
         strength = arr.astype(np.int16) - int(threshold)
         strength = np.clip(strength, 0, 255).astype(np.uint8)
@@ -973,6 +1140,12 @@ class FreePaintMaskApp:
 
         red_val = self._get_red_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
         pigment_val = self._get_pigment_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
+
+        if red_val is not None:
+            red_val = max(0, red_val - self.ref_red)
+
+        if pigment_val is not None:
+            pigment_val = max(0, pigment_val - self.ref_pigment)
 
         if red_val is None and pigment_val is None:
             return
@@ -1104,14 +1277,15 @@ class FreePaintMaskApp:
             except TypeError:
                 red_small = red_crop.resize((dst_w, dst_h), Image.Resampling.BILINEAR)
 
-            heat_overlay = self._make_heat_overlay_partial(
-                red_small=red_small,
+            heat_overlay = self._make_scalar_overlay_partial(
+                gray_small=red_small,
                 threshold=self.heat_threshold,
-                strength_ui=self.heat_strength
+                strength_ui=self.heat_strength,
+                color_rgb=(255, 0, 0)
             )
             disp_partial = Image.alpha_composite(disp_partial, heat_overlay)
 
-            # 補助ヒートマップ（色素）
+        # 補助ヒートマップ（色素）
         if bool(self.show_pigmentmap.get()) and self.pigment_index_map is not None:
             pigment_crop = Image.fromarray(self.pigment_index_map[src_t:src_b, src_l:src_r], mode="L")
             try:
@@ -1140,6 +1314,23 @@ class FreePaintMaskApp:
         self.canvas.delete("hud")
         self._draw_red_value_text()
 
+
+            # ROI枠を再描画（残し続ける）
+        if self.roi_start is not None and self.roi_end is not None:
+            x0, y0 = self.roi_start
+            x1, y1 = self.roi_end
+
+            cx0 = x0 * self.view_scale + self.view_x
+            cy0 = y0 * self.view_scale + self.view_y
+            cx1 = x1 * self.view_scale + self.view_x
+            cy1 = y1 * self.view_scale + self.view_y
+
+            self.roi_rect_id = self.canvas.create_rectangle(
+                cx0, cy0, cx1, cy1,
+                outline=self.roi_outline_color,
+                width=3
+            )
+
         if (self._should_show_brush_preview() or self.show_brush_preview) and self.image is not None:
             self.draw_brush_preview()
 
@@ -1153,6 +1344,73 @@ class FreePaintMaskApp:
         ix = max(0, min(iw - 1, ix))
         iy = max(0, min(ih - 1, iy))
         return ix, iy
+    
+    def _set_reference(self, ix, iy):
+        r = 6  # 半径6px平均
+
+        h, w = self.red_index_map.shape
+
+        x0 = max(0, ix - r)
+        x1 = min(w - 1, ix + r)
+        y0 = max(0, iy - r)
+        y1 = min(h - 1, iy + r)
+
+        red_patch = self.red_index_map[y0:y1+1, x0:x1+1]
+        pig_patch = self.pigment_index_map[y0:y1+1, x0:x1+1]
+
+        self.ref_red = int(np.mean(red_patch))
+        self.ref_pigment = int(np.mean(pig_patch))
+
+        print(f"[REF] red={self.ref_red}, pigment={self.ref_pigment}")
+
+    def auto_paint_from_threshold(self):
+        if self.image is None:
+            return
+
+        use_red = True  # ←最初は赤みだけでOK（あとで切替可）
+
+        if use_red:
+            src = self.red_index_map
+            ref = self.ref_red
+            threshold = self.heat_threshold
+        else:
+            src = self.pigment_index_map
+            ref = self.ref_pigment
+            threshold = self.pigment_threshold
+
+        arr = src.astype(np.int16) - int(ref)
+        arr = np.clip(arr, 0, 255)
+
+        mask_np = np.array(self.mask, dtype=np.uint8)
+
+        target = (arr >= threshold) & (mask_np == 0)
+
+        # ROI制限
+        if self.roi_start is not None and self.roi_end is not None:
+            x0, y0 = self.roi_start
+            x1, y1 = self.roi_end
+
+            xmin, xmax = sorted([x0, x1])
+            ymin, ymax = sorted([y0, y1])
+
+            roi_mask = np.zeros_like(target, dtype=bool)
+            roi_mask[ymin:ymax+1, xmin:xmax+1] = True
+
+            target = target & roi_mask
+
+        # 書き込み
+        mask_np[target] = int(self.current_label)
+
+        self.mask = Image.fromarray(mask_np, mode="L")
+        self.mask_draw = ImageDraw.Draw(self.mask)
+
+        self.push_history()
+        self.redo_stack.clear()
+        self.update_buttons_state()
+
+        self._render(mode="fast")
+        self._schedule_hq()
+
 
     # ------------ プレビュー制御 ------------
     def _should_show_brush_preview(self) -> bool:
@@ -1230,6 +1488,23 @@ class FreePaintMaskApp:
     def on_press(self, event):
         if self.image is None:
             return
+        
+        if self.ref_mode:
+            ix, iy = self.canvas_to_image_xy(event.x, event.y)
+            if ix is not None:
+                self._set_reference(ix, iy)
+            self.ref_mode = False
+            self.btn_ref.config(text="基準色設定")
+            return
+        
+        if self.roi_mode:
+            ix, iy = self.canvas_to_image_xy(event.x, event.y)
+            if ix is not None:
+                self.roi_start = (ix, iy)
+                self.roi_end = (ix, iy)
+                self._render(mode="fast")
+            return
+        
         if self.move_mode:
             self.on_pan_start(event)
             return
@@ -1271,6 +1546,15 @@ class FreePaintMaskApp:
         if self.move_mode:
             self.on_pan_drag(event)
             return
+
+        # ROI指定中は、ブラシ描画ではなく四角ROIを更新する
+        if self.roi_mode and self.roi_start is not None:
+            ix, iy = self.canvas_to_image_xy(event.x, event.y)
+            if ix is not None:
+                self.roi_end = (ix, iy)
+                self._render(mode="fast")
+            return
+
         if self.image is None or self.is_fill_mode or not self.is_drawing:
             return
 
@@ -1299,6 +1583,12 @@ class FreePaintMaskApp:
         self._schedule_hq()
 
     def on_release(self, event):
+        if self.roi_mode:
+            ix, iy = self.canvas_to_image_xy(event.x, event.y)
+            if ix is not None:
+                self.roi_end = (ix, iy)
+                self._render(mode="final")
+            return
         if self.move_mode:
             self.on_pan_end(event)
             return
