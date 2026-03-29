@@ -193,13 +193,20 @@ class FreePaintMaskApp:
         # 元画像だけを表示するかどうか（マスク無しプレビュー）
         self.show_overlay = True
 
-        # 補助ヒートマップ表示
+        # 補助ヒートマップ表示（赤み）
         self.show_heatmap = tk.BooleanVar(value=False)
         self.heat_threshold = 140   # 0-255
         self.red_index_map = None   # 元画像全体の赤み指標（uint8）
+        self.heat_strength = 50     # 0-100
+
+        # 補助ヒートマップ表示（色素）
+        self.show_pigmentmap = tk.BooleanVar(value=False)
+        self.pigment_threshold = 140   # 0-255
+        self.pigment_strength = 50     # 0-100
+        self.pigment_index_map = None  # 元画像全体の色素指標（uint8）
+
         self.last_mouse_canvas_x = None
         self.last_mouse_canvas_y = None
-        self.heat_strength = 50     # 0-100
 
         # ドラッグ
         self.prev_ix = None
@@ -296,6 +303,9 @@ class FreePaintMaskApp:
         tools_row3 = tk.Frame(tools)
         tools_row3.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
 
+        tools_row4 = tk.Frame(tools)
+        tools_row4.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
+
         # Row1: ブラシ系
         self.brush_scale = tk.Scale(tools_row1, from_=5, to=100, orient=tk.HORIZONTAL, length=200,
                                     label="ブラシ:", command=self.on_scale_change)
@@ -381,11 +391,11 @@ class FreePaintMaskApp:
 
         # Row3: 補助ヒートマップ
         heat_frame = tk.LabelFrame(tools_row3, text="補助ヒートマップ")
-        heat_frame.pack(side=tk.LEFT, padx=(0, 10))
+        heat_frame.pack(side=tk.RIGHT, padx=10)
 
         self.chk_heatmap = tk.Checkbutton(
             heat_frame,
-            text="補助ヒートマップ表示",
+            text="赤色ヒートマップ表示",
             variable=self.show_heatmap,
             command=self.on_toggle_heatmap
         )
@@ -412,6 +422,40 @@ class FreePaintMaskApp:
         )
         self.heat_strength_scale.set(self.heat_strength)
         self.heat_strength_scale.pack(side=tk.LEFT, padx=6)
+
+        # Row4: 色素ヒートマップ
+        pigment_frame = tk.LabelFrame(tools_row4)
+        pigment_frame.pack(side=tk.RIGHT, padx=10)
+
+        self.chk_pigmentmap = tk.Checkbutton(
+            pigment_frame,
+            text="色素ヒートマップ表示",
+            variable=self.show_pigmentmap,
+            command=self.on_toggle_pigmentmap
+        )
+        self.chk_pigmentmap.pack(side=tk.LEFT, padx=4)
+
+        self.pigment_thresh_scale = tk.Scale(
+            pigment_frame,
+            from_=0, to=255,
+            orient=tk.HORIZONTAL,
+            length=180,
+            label="閾値",
+            command=self.on_pigment_threshold_change
+        )
+        self.pigment_thresh_scale.set(self.pigment_threshold)
+        self.pigment_thresh_scale.pack(side=tk.LEFT, padx=6)
+
+        self.pigment_strength_scale = tk.Scale(
+            pigment_frame,
+            from_=0, to=100,
+            orient=tk.HORIZONTAL,
+            length=180,
+            label="強度",
+            command=self.on_pigment_strength_change
+        )
+        self.pigment_strength_scale.set(self.pigment_strength)
+        self.pigment_strength_scale.pack(side=tk.LEFT, padx=6)
 
 
         self.var_show_1 = tk.BooleanVar(value=True)
@@ -532,6 +576,25 @@ class FreePaintMaskApp:
     def on_heat_strength_change(self, value):
         try:
             self.heat_strength = int(float(value))
+        except Exception:
+            return
+        self._render(mode="fast")
+        self._schedule_hq()
+
+    def on_toggle_pigmentmap(self):
+        self._render(mode="final")
+
+    def on_pigment_threshold_change(self, value):
+        try:
+            self.pigment_threshold = int(float(value))
+        except Exception:
+            return
+        self._render(mode="fast")
+        self._schedule_hq()
+
+    def on_pigment_strength_change(self, value):
+        try:
+            self.pigment_strength = int(float(value))
         except Exception:
             return
         self._render(mode="fast")
@@ -716,6 +779,8 @@ class FreePaintMaskApp:
 
         self.image = img
         self.red_index_map = self._build_red_index_map(self.image)
+        self.pigment_index_map = self._build_pigment_index_map(self.image)
+
         self._build_mipmaps()
 
         # ラベルマスク（L, 0で初期化）
@@ -773,6 +838,38 @@ class FreePaintMaskApp:
         else:
             norm = ((exr - mn) / (mx - mn) * 255.0).clip(0, 255).astype(np.uint8)
         return norm
+    
+    def _build_pigment_index_map(self, pil_rgba):
+        """
+        色素指標マップを 0-255 の uint8 で返す。
+        簡易版：
+          - 暗さ（255 - 明るさ）
+          - 黄み/茶色っぽさ（R-G がやや大きい部分）
+        を混ぜる
+        """
+        rgb = np.array(pil_rgba.convert("RGB"), dtype=np.float32)
+        r = rgb[:, :, 0]
+        g = rgb[:, :, 1]
+        b = rgb[:, :, 2]
+
+        # 明るさ（簡易）
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        darkness = 255.0 - luminance
+
+        # 茶色っぽさの簡易成分
+        # RがGよりやや高いときに上がりやすい
+        brownness = np.clip(r - g, 0, 255)
+
+        pigment = 0.75 * darkness + 0.25 * brownness
+
+        mn = float(pigment.min())
+        mx = float(pigment.max())
+        if mx - mn < 1e-6:
+            norm = np.zeros_like(pigment, dtype=np.uint8)
+        else:
+            norm = ((pigment - mn) / (mx - mn) * 255.0).clip(0, 255).astype(np.uint8)
+
+        return norm
 
     def _make_heat_overlay_partial(self, red_small, threshold, strength_ui):
         """
@@ -812,6 +909,41 @@ class FreePaintMaskApp:
         rgba[:, :, 3] = alpha_map
 
         return Image.fromarray(rgba, mode="RGBA")
+    
+    def _make_scalar_overlay_partial(self, gray_small, threshold, strength_ui, color_rgb):
+        """
+        gray_small: リサイズ済み1chマップ(PIL L)
+        threshold以上だけ指定色のオーバーレイを作る
+
+        strength_ui: 0-100
+        color_rgb: (R, G, B)
+        """
+        arr = np.array(gray_small, dtype=np.uint8)
+
+        strength = arr.astype(np.int16) - int(threshold)
+        strength = np.clip(strength, 0, 255).astype(np.uint8)
+
+        if strength.max() == 0:
+            return Image.new("RGBA", gray_small.size, (0, 0, 0, 0))
+
+        s = float(np.clip(strength_ui, 0, 100)) / 100.0
+
+        alpha_max = 100.0 + 155.0 * s
+        gamma = 1.8 - 1.5 * s
+
+        norm = strength.astype(np.float32) / 255.0
+        norm = np.power(norm, gamma)
+
+        alpha_map = (norm * alpha_max).clip(0, 255).astype(np.uint8)
+
+        h, w = strength.shape
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, 0] = int(color_rgb[0])
+        rgba[:, :, 1] = int(color_rgb[1])
+        rgba[:, :, 2] = int(color_rgb[2])
+        rgba[:, :, 3] = alpha_map
+
+        return Image.fromarray(rgba, mode="RGBA")
 
     def _get_red_value_at_canvas(self, cx, cy):
         if self.image is None or self.red_index_map is None:
@@ -823,25 +955,49 @@ class FreePaintMaskApp:
             return int(self.red_index_map[iy, ix])
         except Exception:
             return None
+        
+    def _get_pigment_value_at_canvas(self, cx, cy):
+        if self.image is None or self.pigment_index_map is None:
+            return None
+        ix, iy = self.canvas_to_image_xy(cx, cy)
+        if ix is None:
+            return None
+        try:
+            return int(self.pigment_index_map[iy, ix])
+        except Exception:
+            return None
 
     def _draw_red_value_text(self):
         if self.last_mouse_canvas_x is None or self.last_mouse_canvas_y is None:
             return
-        val = self._get_red_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
-        if val is None:
+
+        red_val = self._get_red_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
+        pigment_val = self._get_pigment_value_at_canvas(self.last_mouse_canvas_x, self.last_mouse_canvas_y)
+
+        if red_val is None and pigment_val is None:
             return
 
-        text = f"赤み: {val}"
+        line1 = f"赤み: {red_val}" if red_val is not None else "赤み: -"
+        line2 = f"色素: {pigment_val}" if pigment_val is not None else "色素: -"
+
         x = 12
         y = 12
 
         self.canvas.create_rectangle(
-            x - 4, y - 4, x + 92, y + 20,
+            x - 4, y - 4, x + 120, y + 38,
             fill="black", outline="white", width=1, tags="hud"
         )
         self.canvas.create_text(
             x, y,
-            text=text,
+            text=line1,
+            anchor="nw",
+            fill="white",
+            font=("Arial", 11, "bold"),
+            tags="hud"
+        )
+        self.canvas.create_text(
+            x, y + 18,
+            text=line2,
             anchor="nw",
             fill="white",
             font=("Arial", 11, "bold"),
@@ -954,6 +1110,23 @@ class FreePaintMaskApp:
                 strength_ui=self.heat_strength
             )
             disp_partial = Image.alpha_composite(disp_partial, heat_overlay)
+
+            # 補助ヒートマップ（色素）
+        if bool(self.show_pigmentmap.get()) and self.pigment_index_map is not None:
+            pigment_crop = Image.fromarray(self.pigment_index_map[src_t:src_b, src_l:src_r], mode="L")
+            try:
+                pigment_small = pigment_crop.resize((dst_w, dst_h), Image.Resampling.BILINEAR, reducing_gap=3.0)
+            except TypeError:
+                pigment_small = pigment_crop.resize((dst_w, dst_h), Image.Resampling.BILINEAR)
+
+            # 色素は見分けやすいように紫〜茶寄りではなく、まずはマゼンタ系で可視化
+            pigment_overlay = self._make_scalar_overlay_partial(
+                gray_small=pigment_small,
+                threshold=self.pigment_threshold,
+                strength_ui=self.pigment_strength,
+                color_rgb=(255, 0, 255)
+            )
+            disp_partial = Image.alpha_composite(disp_partial, pigment_overlay)
 
         canvas_img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
         canvas_img.paste(disp_partial, (vis_l, vis_t))
