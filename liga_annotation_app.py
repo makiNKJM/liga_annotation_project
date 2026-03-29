@@ -196,11 +196,10 @@ class FreePaintMaskApp:
         # 補助ヒートマップ表示
         self.show_heatmap = tk.BooleanVar(value=False)
         self.heat_threshold = 140   # 0-255
-        self.heat_alpha = 90        # 0-255
         self.red_index_map = None   # 元画像全体の赤み指標（uint8）
         self.last_mouse_canvas_x = None
         self.last_mouse_canvas_y = None
-        self.heat_gamma = 1.0   # ←追加（1.0が標準）
+        self.heat_strength = 50     # 0-100
 
         # ドラッグ
         self.prev_ix = None
@@ -403,28 +402,16 @@ class FreePaintMaskApp:
         self.heat_thresh_scale.set(self.heat_threshold)
         self.heat_thresh_scale.pack(side=tk.LEFT, padx=6)
 
-        self.heat_alpha_scale = tk.Scale(
+        self.heat_strength_scale = tk.Scale(
             heat_frame,
-            from_=0, to=255,
+            from_=0, to=100,
             orient=tk.HORIZONTAL,
             length=180,
-            label="透明度",
-            command=self.on_heat_alpha_change
+            label="強度",
+            command=self.on_heat_strength_change
         )
-        self.heat_alpha_scale.set(self.heat_alpha)
-        self.heat_alpha_scale.pack(side=tk.LEFT, padx=6)
-
-        self.heat_gamma_scale = tk.Scale(
-            heat_frame,
-            from_=0.3, to=3.0, 
-            resolution=0.1,
-            orient=tk.HORIZONTAL,
-            length=180,
-            label="強調",
-            command=self.on_heat_gamma_change
-        )
-        self.heat_gamma_scale.set(self.heat_gamma)
-        self.heat_gamma_scale.pack(side=tk.LEFT, padx=6)
+        self.heat_strength_scale.set(self.heat_strength)
+        self.heat_strength_scale.pack(side=tk.LEFT, padx=6)
 
 
         self.var_show_1 = tk.BooleanVar(value=True)
@@ -542,21 +529,14 @@ class FreePaintMaskApp:
         self._render(mode="fast")
         self._schedule_hq()
 
-    def on_heat_alpha_change(self, value):
+    def on_heat_strength_change(self, value):
         try:
-            self.heat_alpha = int(float(value))
+            self.heat_strength = int(float(value))
         except Exception:
             return
         self._render(mode="fast")
         self._schedule_hq()
-    
-    def on_heat_gamma_change(self, value):
-        try:
-            self.heat_gamma = float(value)
-        except Exception:
-            return
-        self._render(mode="fast")
-        self._schedule_hq()
+
 
     # ------------ キー処理 ------------
     def on_key(self, ev):
@@ -794,10 +774,14 @@ class FreePaintMaskApp:
             norm = ((exr - mn) / (mx - mn) * 255.0).clip(0, 255).astype(np.uint8)
         return norm
 
-    def _make_heat_overlay_partial(self, red_small, threshold, alpha):
+    def _make_heat_overlay_partial(self, red_small, threshold, strength_ui):
         """
         red_small: リサイズ済み赤みマップ(PIL L)
         threshold以上だけ赤オーバーレイを作る
+
+        strength_ui: 0-100
+          - 左: 控えめ表示（強い赤中心）
+          - 右: 薄い赤も見えやすい
         """
         arr = np.array(red_small, dtype=np.uint8)
 
@@ -808,19 +792,24 @@ class FreePaintMaskApp:
         if strength.max() == 0:
             return Image.new("RGBA", red_small.size, (0, 0, 0, 0))
 
+        s = float(np.clip(strength_ui, 0, 100)) / 100.0
+
+        # UI 1本で alpha_max と gamma を連動
+        # 左: 控えめ / 右: 薄い赤も持ち上げる
+        alpha_max = 100.0 + 155.0 * s      # 100 → 255
+        gamma = 1.8 - 1.5 * s              # 1.8 → 0.3
+
         norm = strength.astype(np.float32) / 255.0
+        norm = np.power(norm, gamma)
 
-        # ★ここが強調の本体
-        norm = np.power(norm, self.heat_gamma)
-
-        alpha_map = (norm * float(alpha)).clip(0, 255).astype(np.uint8)
+        alpha_map = (norm * alpha_max).clip(0, 255).astype(np.uint8)
 
         h, w = strength.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[:, :, 0] = 255          # R
-        rgba[:, :, 1] = 0            # G
-        rgba[:, :, 2] = 0            # B
-        rgba[:, :, 3] = alpha_map    # A
+        rgba[:, :, 0] = 255
+        rgba[:, :, 1] = 0
+        rgba[:, :, 2] = 0
+        rgba[:, :, 3] = alpha_map
 
         return Image.fromarray(rgba, mode="RGBA")
 
@@ -962,7 +951,7 @@ class FreePaintMaskApp:
             heat_overlay = self._make_heat_overlay_partial(
                 red_small=red_small,
                 threshold=self.heat_threshold,
-                alpha=self.heat_alpha
+                strength_ui=self.heat_strength
             )
             disp_partial = Image.alpha_composite(disp_partial, heat_overlay)
 
